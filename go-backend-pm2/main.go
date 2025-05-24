@@ -96,7 +96,7 @@ func stripANSI(input string) string {
 }
 
 func handler(w http.ResponseWriter, r *http.Request) {
-	log.Println("[DEBUG] HTTP request received")
+	// log.Println("[DEBUG] HTTP request received")
 	processes, err := getPM2Processes()
 	if err != nil {
 		log.Printf("[ERROR] Handler failed: %v\n", err)
