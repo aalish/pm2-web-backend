@@ -27,14 +27,14 @@ type ProcessInfo struct {
 }
 
 func getPM2Processes() (map[string]ProcessInfo, error) {
-	log.Println("[DEBUG] Running `pm2 jlist`...")
+	// log.Println("[DEBUG] Running `pm2 jlist`...")
 	cmd := exec.Command("pm2", "jlist")
 	output, err := cmd.Output()
 	if err != nil {
-		log.Printf("[ERROR] Failed to run pm2 jlist: %v\n", err)
+		// log.Printf("[ERROR] Failed to run pm2 jlist: %v\n", err)
 		return nil, err
 	}
-	log.Println("[DEBUG] Successfully fetched pm2 jlist")
+	// log.Println("[DEBUG] Successfully fetched pm2 jlist")
 
 	var processes []PM2Process
 	err = json.Unmarshal(output, &processes)
@@ -42,15 +42,15 @@ func getPM2Processes() (map[string]ProcessInfo, error) {
 		log.Printf("[ERROR] Failed to unmarshal pm2 jlist JSON: %v\n", err)
 		return nil, err
 	}
-	log.Printf("[DEBUG] Found %d processes\n", len(processes))
+	// log.Printf("[DEBUG] Found %d processes\n", len(processes))
 
 	result := make(map[string]ProcessInfo)
 
 	for _, p := range processes {
-		log.Printf("[DEBUG] Fetching logs for process: %s\n", p.Name)
+		// log.Printf("[DEBUG] Fetching logs for process: %s\n", p.Name)
 		logs, err := getErrorLogs(p.Name)
 		if err != nil {
-			log.Printf("[WARN] Failed to get error logs for %s: %v\n", p.Name, err)
+			// log.Printf("[WARN] Failed to get error logs for %s: %v\n", p.Name, err)
 			logs = "Error fetching logs"
 		}
 
@@ -97,7 +97,7 @@ func stripANSI(input string) string {
 
 func handler(w http.ResponseWriter, r *http.Request) {
 	log.Println("[DEBUG] HTTP request received")
-	processes, err := getPM2Processes()
+	// processes, err := getPM2Processes()
 	if err != nil {
 		log.Printf("[ERROR] Handler failed: %v\n", err)
 		http.Error(w, "Failed to get PM2 processes: "+err.Error(), http.StatusInternalServerError)
@@ -116,7 +116,7 @@ func main() {
 	http.HandleFunc("/", handler)
 	log.Println("[INFO] Server starting on http://localhost:8080/")
 	err := http.ListenAndServe(":8080", nil)
-	if err != nil {
-		log.Fatalf("[FATAL] Server failed to start: %v\n", err)
-	}
+	// if err != nil {
+	// 	log.Fatalf("[FATAL] Server failed to start: %v\n", err)
+	// }
 }
