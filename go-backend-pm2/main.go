@@ -97,7 +97,7 @@ func stripANSI(input string) string {
 
 func handler(w http.ResponseWriter, r *http.Request) {
 	log.Println("[DEBUG] HTTP request received")
-	// processes, err := getPM2Processes()
+	processes, err := getPM2Processes()
 	if err != nil {
 		log.Printf("[ERROR] Handler failed: %v\n", err)
 		http.Error(w, "Failed to get PM2 processes: "+err.Error(), http.StatusInternalServerError)
@@ -116,7 +116,7 @@ func main() {
 	http.HandleFunc("/", handler)
 	log.Println("[INFO] Server starting on http://localhost:8080/")
 	err := http.ListenAndServe(":8080", nil)
-	// if err != nil {
-	// 	log.Fatalf("[FATAL] Server failed to start: %v\n", err)
-	// }
+	if err != nil {
+		log.Fatalf("[FATAL] Server failed to start: %v\n", err)
+	}
 }
