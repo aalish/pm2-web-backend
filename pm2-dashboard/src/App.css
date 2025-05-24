@@ -13,7 +13,7 @@ body {
 .card {
   background: white;
   border-radius: 8px;
-  padding: 16px;
+  padding: 6px;
   margin-bottom: 16px;
   box-shadow: 0 2px 4px rgba(0,0,0,0.1);
 }
@@ -69,4 +69,62 @@ pre.log {
 
 .toggle-btn:hover {
   background-color: #555;
+}
+.app-line {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.left-side {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.right-side {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.app-name {
+  font-size: 1rem;
+  font-weight: bold;
+}
+
+.args {
+  color: #555;
+  font-family: monospace;
+}
+
+.status {
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 0.9rem;
+  color: white;
+  white-space: nowrap;
+}
+
+.status.online {
+  background-color: #22c55e;
+}
+
+.status.offline {
+  background-color: #ef4444;
+}
+
+.arrow-btn {
+  background: none;
+  border: none;
+  font-size: 1.2rem;
+  cursor: pointer;
+  padding: 0;
+}
+
+.arrow-btn:hover {
+  color: #888;
 }

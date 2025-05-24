@@ -25,35 +25,38 @@ const PM2Dashboard = () => {
 
   if (loading) return <div className="container">Loading...</div>;
   if (error) return <div className="container error">Error: {error}</div>;
-
   return (
     <div className="container">
       {Object.entries(data).map(([name, info]) => (
         <div className="card" key={name}>
           <div className="card-header">
-            <h4>{name}</h4>
-            <span className={`status ${info.State === 'online' ? 'online' : 'offline'}`}>
-              {info.State}
-            </span>
+            <div className="app-line">
+              <div className="left-side">
+                <strong className="app-name">{name}</strong>
+                <span className="args">: {info.Args.join(' ')}</span>
+              </div>
+  
+              <div className="right-side">
+                <span className={`status ${info.State === 'online' ? 'online' : 'offline'}`}>
+                  {info.State}
+                </span>
+                <button className="arrow-btn" onClick={() => toggleExpand(name)}>
+                  {expanded[name] ? '▾' : '▸'}
+                </button>
+              </div>
+            </div>
           </div>
-
-          <div className="card-section">
-            <strong>Args:</strong>
-            <code>{info.Args.join(' ')}</code>
-          </div>
-
-          <div className="card-section">
-            <button className="toggle-btn" onClick={() => toggleExpand(name)}>
-              {expanded[name] ? 'Hide Error Logs' : 'Show Error Logs'}
-            </button>
-            {expanded[name] && (
+  
+          {expanded[name] && (
+            <div className="card-section">
               <pre className="log">{info['Error logs']}</pre>
-            )}
-          </div>
+            </div>
+          )}
         </div>
       ))}
     </div>
   );
+  
 };
 
 export default PM2Dashboard;
