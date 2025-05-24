@@ -65,7 +65,7 @@ func getPM2Processes() (map[string]ProcessInfo, error) {
 }
 
 func getErrorLogs(name string) (string, error) {
-	cmd := exec.Command("pm2", "logs", name, "--lines", "20", "--err", "--raw", "--nostream")
+	cmd := exec.Command("pm2", "logs", name, "--lines", "100", "--err", "--raw", "--nostream")
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &out
