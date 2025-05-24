@@ -115,7 +115,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 func main() {
 	http.HandleFunc("/", handler)
 	log.Println("[INFO] Server starting on http://localhost:8080/")
-	err := http.ListenAndServe(":8080", nil)
+	err := http.ListenAndServe("127.0.0.1:8080", nil)
 	if err != nil {
 		log.Fatalf("[FATAL] Server failed to start: %v\n", err)
 	}
