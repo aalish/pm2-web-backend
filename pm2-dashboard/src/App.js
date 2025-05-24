@@ -5,7 +5,7 @@ import './App.css';
 function App() {
   return (
     <div>
-      <h1>PM2 Process Dashboard</h1>
+      <h2>PM2 Process Dashboard</h2>
       <PM2Dashboard />
     </div>
   );

@@ -56,3 +56,17 @@ pre.log {
   background: #000;
   color: #0f0;
 }
+
+.toggle-btn {
+  margin-top: 8px;
+  background-color: #333;
+  color: white;
+  border: none;
+  padding: 6px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.toggle-btn:hover {
+  background-color: #555;
+}
