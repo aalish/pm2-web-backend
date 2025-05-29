@@ -1,8 +1,8 @@
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from "react";
 
 const fetchData = async () => {
-  const res = await fetch('http://localhost:8080');
-  if (!res.ok) throw new Error('Failed to fetch');
+  const res = await fetch("http://localhost:8080");
+  if (!res.ok) throw new Error("Failed to fetch");
   return res.json();
 };
 
@@ -33,30 +33,36 @@ const PM2Dashboard = () => {
             <div className="app-line">
               <div className="left-side">
                 <strong className="app-name">{name}</strong>
-                <span className="args">: {info.Args.join(' ')}</span>
+                <span className="args">: {info.Args.join(" ")}</span>
               </div>
-  
+
               <div className="right-side">
-                <span className={`status ${info.State === 'online' ? 'online' : 'offline'}`}>
+                <span
+                  className={`status ${
+                    info.State === "online" ? "online" : "offline"
+                  }`}
+                >
                   {info.State}
                 </span>
-                <button className="arrow-btn" onClick={() => toggleExpand(name)}>
-                  {expanded[name] ? '▾' : '▸'}
+                <button
+                  className="arrow-btn"
+                  onClick={() => toggleExpand(name)}
+                >
+                  {expanded[name] ? "▾" : "▸"}
                 </button>
               </div>
             </div>
           </div>
-  
+
           {expanded[name] && (
             <div className="card-section">
-              <pre className="log">{info['Error logs']}</pre>
+              <pre className="log">{info["Error logs"]}</pre>
             </div>
           )}
         </div>
       ))}
     </div>
   );
-  
 };
 
 export default PM2Dashboard;
