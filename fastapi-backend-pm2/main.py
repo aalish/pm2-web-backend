@@ -290,7 +290,11 @@ def sync_processes():
                     wallet = bt.wallet(name=wallet_name, hotkey=hotkey)
                     # Try to find UID
                     uid = -1
-                    if netuid in netuid_hotkeys and netuid_hotkeys[netuid]:
+                    if (
+                        netuid in netuid_hotkeys
+                        and netuid_hotkeys[netuid]
+                        and info.State == "online"
+                    ):
                         try:
                             # Using the hardcoded address for now as in your example
                             # uid = netuid_hotkeys[netuid].index(
