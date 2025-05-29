@@ -283,7 +283,7 @@ def sync_processes():
                 netuid = extract_arg_value(info.Args, "--netuid")
                 wallet_name = extract_arg_value(info.Args, "--wallet.name")
                 hotkey = extract_arg_value(info.Args, "--wallet.hotkey")
-                miner_uid = extract_arg_value(info.Args, "--miner.uid")
+                miner_uid = extract_arg_value(info.Args, "--miner_uid")
                 port = extract_arg_value(info.Args, "--axon.port")
 
                 if netuid and wallet_name and hotkey:
