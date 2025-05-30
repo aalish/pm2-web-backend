@@ -36,6 +36,10 @@ metagraph_cache_lock = threading.Lock()
 # Thread pool for subprocess commands
 pm2_executor = ThreadPoolExecutor(max_workers=config.MAX_CONCURRENT_SUBPROCESSES)
 
+# Global background task references
+background_task = None
+metagraph_task = None
+
 
 # Optimized data structures
 class CompactProcessInfo(NamedTuple):
@@ -132,44 +136,76 @@ sync_scheduler = AdaptiveSyncScheduler()
 
 
 class MetagraphCache:
-    """Caches metagraph data with TTL"""
+    """Caches metagraph data with independent sync schedule"""
 
     def __init__(self):
         self.cache = {}
         self.last_sync = {}
         self.lock = threading.Lock()
+        self.sync_in_progress = {}
 
-    def should_sync(self, netuid: str) -> bool:
-        """Only sync if data is older than TTL"""
+    def is_sync_needed(self, netuid: str) -> bool:
+        """Check if sync is needed (used by process sync)"""
         with self.lock:
             if netuid not in self.last_sync:
                 return True
+            # Only sync if data is stale
             return time.time() - self.last_sync[netuid] > config.METAGRAPH_CACHE_TTL
 
-    async def get_metagraph_data_async(self, netuid: int):
+    def force_sync(self, netuid: str):
+        """Force a sync by clearing last sync time"""
+        with self.lock:
+            if netuid in self.last_sync:
+                del self.last_sync[netuid]
+
+    async def get_metagraph_data_async(self, netuid: int, force: bool = False):
         """Get cached or fresh metagraph data asynchronously"""
         netuid_str = str(netuid)
 
-        if self.should_sync(netuid_str):
+        # Check if sync is already in progress for this netuid
+        with self.lock:
+            if self.sync_in_progress.get(netuid_str, False):
+                logger.info(f"Sync already in progress for netuid {netuid}, waiting...")
+                # Wait a bit and return cached data
+                await asyncio.sleep(1)
+                return self.cache.get(netuid_str)
+
+        if force or self.is_sync_needed(netuid_str):
             try:
+                with self.lock:
+                    self.sync_in_progress[netuid_str] = True
+
+                logger.info(f"Starting metagraph sync for netuid {netuid}")
+
                 # Run sync in thread pool to avoid blocking
                 loop = asyncio.get_event_loop()
+                start_time = time.time()
+
                 metagraph = await loop.run_in_executor(
                     None, lambda: bt.metagraph(netuid=netuid)
                 )
                 await loop.run_in_executor(None, metagraph.sync)
+
+                sync_duration = time.time() - start_time
 
                 with self.lock:
                     self.cache[netuid_str] = {
                         "hotkeys": metagraph.hotkeys,
                         "stakes": metagraph.S,
                         "emissions": metagraph.E,
+                        "sync_duration": sync_duration,
                     }
                     self.last_sync[netuid_str] = time.time()
+                    self.sync_in_progress[netuid_str] = False
 
-                logger.info(f"Metagraph synced for netuid {netuid}")
+                logger.info(
+                    f"Metagraph synced for netuid {netuid} in {sync_duration:.2f}s"
+                )
+
             except Exception as e:
                 logger.error(f"Failed to sync netuid {netuid}: {e}")
+                with self.lock:
+                    self.sync_in_progress[netuid_str] = False
                 return self.cache.get(netuid_str)
 
         with self.lock:
@@ -177,6 +213,82 @@ class MetagraphCache:
 
 
 metagraph_cache_instance = MetagraphCache()
+
+
+async def metagraph_sync_loop():
+    """Dedicated background loop for metagraph syncing every 5 minutes"""
+    # Wait 30 seconds before first sync to let processes initialize
+    await asyncio.sleep(30)
+
+    while True:
+        try:
+            logger.info("=== Starting scheduled metagraph sync (5 minute interval) ===")
+            sync_start_time = time.time()
+
+            # Get all unique netuids from current processes
+            active_netuids = set()
+
+            with cache_lock:
+                current_data = process_cache.get("data", [])
+
+            for process in current_data:
+                netuid = process.get("netuid")
+                if netuid and process.get("state") == "online":
+                    try:
+                        active_netuids.add(int(netuid))
+                    except (ValueError, TypeError):
+                        pass
+
+            if active_netuids:
+                logger.info(
+                    f"Found {len(active_netuids)} active netuids to sync: {sorted(active_netuids)}"
+                )
+
+                # Force sync all active netuids
+                tasks = []
+                for netuid in sorted(active_netuids):
+                    # Force sync by passing force=True
+                    task = metagraph_cache_instance.get_metagraph_data_async(
+                        netuid, force=True
+                    )
+                    tasks.append((netuid, task))
+
+                # Wait for all syncs to complete
+                if tasks:
+                    results = await asyncio.gather(
+                        *[task for _, task in tasks], return_exceptions=True
+                    )
+
+                    success_count = 0
+                    failed_netuids = []
+
+                    for (netuid, _), result in zip(tasks, results):
+                        if isinstance(result, Exception):
+                            logger.error(f"Failed to sync netuid {netuid}: {result}")
+                            failed_netuids.append(netuid)
+                        elif result is not None:
+                            success_count += 1
+
+                    sync_duration = time.time() - sync_start_time
+                    logger.info(
+                        f"=== Metagraph sync completed in {sync_duration:.2f}s: "
+                        f"{success_count}/{len(tasks)} successful ==="
+                    )
+
+                    if failed_netuids:
+                        logger.warning(f"Failed netuids: {failed_netuids}")
+            else:
+                logger.info("=== No active netuids to sync ===")
+
+        except Exception as e:
+            logger.error(f"Error in metagraph sync loop: {e}")
+
+        # Calculate time to next sync to ensure exactly 5 minute intervals
+        elapsed = time.time() - sync_start_time
+        sleep_time = max(0, config.METAGRAPH_SYNC_INTERVAL - elapsed)
+
+        logger.info(f"Next metagraph sync in {sleep_time:.1f} seconds")
+        await asyncio.sleep(sleep_time)
 
 
 def extract_arg_value(args: List[str], arg_name: str) -> Optional[str]:
@@ -368,21 +480,15 @@ async def sync_processes_async():
                     netuid_wallets[netuid].add(wallet_name)
                     active_netuids.add(int(netuid))
 
-        # Fetch metagraph data concurrently for active netuids
-        metagraph_tasks = []
-        for netuid in active_netuids:
-            task = metagraph_cache_instance.get_metagraph_data_async(netuid)
-            metagraph_tasks.append((netuid, task))
-
-        # Wait for metagraph data
+        # Fetch metagraph data from cache (don't force sync here)
         metagraph_results = {}
-        if metagraph_tasks:
-            results = await asyncio.gather(
-                *[task for _, task in metagraph_tasks], return_exceptions=True
+        for netuid in active_netuids:
+            # Get cached data without forcing sync
+            cached_data = await metagraph_cache_instance.get_metagraph_data_async(
+                netuid, force=False
             )
-            for (netuid, _), result in zip(metagraph_tasks, results):
-                if not isinstance(result, Exception) and result:
-                    metagraph_results[str(netuid)] = result
+            if cached_data:
+                metagraph_results[str(netuid)] = cached_data
 
         # Process logs - only for changed processes or all if first run
         log_tasks = []
@@ -445,7 +551,6 @@ async def sync_processes_async():
                     try:
                         wallet = bt.wallet(name=wallet_name, hotkey=hotkey)
                         hotkey_ss58 = wallet.hotkey.ss58_address
-                        # hotkey_ss58 = "5FnuQif2GSDtuRU28MgZSCsi53oqKqDpq1Bko4TiK6GTwT76"
 
                         # Get metagraph data
                         metagraph_data = metagraph_results.get(netuid)
@@ -497,7 +602,6 @@ async def sync_processes_async():
                         port="",
                         stake=0.0,
                         emission=0.0,
-                        daily_alpha=0.0,
                         error_logs=f"Processing error: {str(e)}",
                         out_logs="",
                     )
@@ -513,10 +617,10 @@ async def sync_processes_async():
         # Store current processes for next comparison
         previous_processes = processes
 
-        logger.info(f"Async sync completed. Found {len(responses)} processes.")
+        logger.info(f"Process sync completed. Found {len(responses)} processes.")
 
     except Exception as e:
-        logger.error(f"Error during async synchronization: {e}")
+        logger.error(f"Error during process synchronization: {e}")
         with cache_lock:
             process_cache["is_updating"] = False
             process_cache["error"] = str(e)
@@ -530,12 +634,12 @@ async def background_sync_loop_async():
 
             # Get next interval from adaptive scheduler
             next_interval = sync_scheduler.get_next_interval()
-            logger.info(f"Next sync in {next_interval} seconds")
+            logger.info(f"Next process sync in {next_interval} seconds")
 
             await asyncio.sleep(next_interval)
 
         except Exception as e:
-            logger.error(f"Unexpected error in async sync loop: {e}")
+            logger.error(f"Unexpected error in process sync loop: {e}")
             await asyncio.sleep(30)  # Wait before retry
 
 
@@ -556,25 +660,24 @@ def get_resource_usage():
         return {}
 
 
-# Global background task reference
-background_task = None
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifespan - startup and shutdown"""
-    global background_task
+    global background_task, metagraph_task
 
     # Startup
-    logger.info("Starting up...")
+    logger.info("Starting up PM2 Process Monitor...")
 
     # Run initial sync
     await sync_processes_async()
 
-    # Start background async sync loop
+    # Start background process sync loop
     background_task = asyncio.create_task(background_sync_loop_async())
+    logger.info("Background process synchronization started")
 
-    logger.info("Background async synchronization started")
+    # Start metagraph sync loop - runs every 5 minutes strictly
+    metagraph_task = asyncio.create_task(metagraph_sync_loop())
+    logger.info("Metagraph sync scheduled every 5 minutes (strict interval)")
 
     # Log initial resource usage
     resources = get_resource_usage()
@@ -585,13 +688,20 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("Shutting down...")
 
-    # Cancel background task
+    # Cancel background tasks
+    tasks_to_cancel = []
+
     if background_task:
-        background_task.cancel()
-        try:
-            await background_task
-        except asyncio.CancelledError:
-            pass
+        tasks_to_cancel.append(background_task)
+
+    if metagraph_task:
+        tasks_to_cancel.append(metagraph_task)
+
+    for task in tasks_to_cancel:
+        task.cancel()
+
+    # Wait for all tasks to complete cancellation
+    await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
 
     # Close thread pool
     pm2_executor.shutdown(wait=True)
@@ -664,6 +774,20 @@ async def health_check():
         is_updating = process_cache.get("is_updating", False)
         has_error = bool(process_cache.get("error"))
 
+    # Check metagraph sync health
+    metagraph_health = {}
+    with metagraph_cache_instance.lock:
+        current_time = time.time()
+        for netuid, last_sync_time in metagraph_cache_instance.last_sync.items():
+            time_since_sync = current_time - last_sync_time
+            # Warn if sync is overdue by more than 1 minute
+            is_healthy = time_since_sync < (config.METAGRAPH_SYNC_INTERVAL + 60)
+            metagraph_health[netuid] = {
+                "healthy": is_healthy,
+                "minutes_since_sync": round(time_since_sync / 60, 1),
+                "overdue": not is_healthy,
+            }
+
     # Check if last update was too long ago
     unhealthy_threshold = 300  # 5 minutes
     time_since_update = None
@@ -674,17 +798,93 @@ async def health_check():
         if time_since_update > unhealthy_threshold:
             is_healthy = False
 
+    # Check if any metagraph is unhealthy
+    metagraph_is_healthy = all(m["healthy"] for m in metagraph_health.values())
+
     return {
-        "status": "healthy" if is_healthy and not has_error else "unhealthy",
+        "status": (
+            "healthy"
+            if is_healthy and not has_error and metagraph_is_healthy
+            else "unhealthy"
+        ),
         "last_update_seconds_ago": time_since_update,
         "is_updating": is_updating,
         "has_error": has_error,
         "resources": resources,
+        "metagraph_health": metagraph_health,
         "config": {
-            "sync_interval": sync_scheduler.current_interval,
+            "process_sync_interval": sync_scheduler.current_interval,
+            "metagraph_sync_interval": config.METAGRAPH_SYNC_INTERVAL,
             "max_log_lines": config.MAX_LOG_LINES,
             "async_enabled": config.USE_ASYNC_SUBPROCESS,
         },
+    }
+
+
+@app.get("/metagraph-status")
+async def get_metagraph_status():
+    """Get detailed metagraph cache status"""
+    with metagraph_cache_instance.lock:
+        cache_status = {}
+        current_time = time.time()
+
+        for netuid, last_sync_time in metagraph_cache_instance.last_sync.items():
+            time_since_sync = current_time - last_sync_time
+            next_sync_in = max(0, config.METAGRAPH_SYNC_INTERVAL - time_since_sync)
+
+            cache_data = metagraph_cache_instance.cache.get(netuid, {})
+
+            cache_status[netuid] = {
+                "last_sync": datetime.fromtimestamp(last_sync_time).isoformat(),
+                "seconds_since_sync": round(time_since_sync),
+                "minutes_since_sync": round(time_since_sync / 60, 1),
+                "next_sync_in_seconds": round(next_sync_in),
+                "next_sync_in_minutes": round(next_sync_in / 60, 1),
+                "cached_data_available": bool(cache_data),
+                "sync_in_progress": metagraph_cache_instance.sync_in_progress.get(
+                    netuid, False
+                ),
+                "hotkeys_count": (
+                    len(cache_data.get("hotkeys", [])) if cache_data else 0
+                ),
+                "last_sync_duration": (
+                    cache_data.get("sync_duration", 0) if cache_data else 0
+                ),
+            }
+
+    # Get info about netuids that might need syncing
+    active_netuids = set()
+    with cache_lock:
+        for process in process_cache.get("data", []):
+            if process.get("state") == "online" and process.get("netuid"):
+                try:
+                    active_netuids.add(str(int(process.get("netuid"))))
+                except (ValueError, TypeError):
+                    pass
+
+    missing_netuids = active_netuids - set(cache_status.keys())
+
+    return {
+        "metagraph_cache_status": cache_status,
+        "sync_interval_minutes": config.METAGRAPH_SYNC_INTERVAL / 60,
+        "total_netuids_cached": len(cache_status),
+        "active_netuids": sorted(list(active_netuids)),
+        "missing_netuids": sorted(list(missing_netuids)),
+        "next_scheduled_sync": (
+            datetime.fromtimestamp(
+                time.time()
+                + max(
+                    0,
+                    config.METAGRAPH_SYNC_INTERVAL
+                    - min(
+                        [v["seconds_since_sync"] for v in cache_status.values()],
+                        default=config.METAGRAPH_SYNC_INTERVAL,
+                    ),
+                )
+            ).isoformat()
+            if cache_status
+            else None
+        ),
     }
 
 
@@ -707,8 +907,71 @@ async def force_refresh():
     return {"status": "refresh_started", "message": "Manual refresh initiated"}
 
 
+@app.post("/refresh-metagraph/{netuid}")
+async def force_refresh_metagraph(netuid: int):
+    """Force a manual refresh of metagraph data for specific netuid"""
+    logger.info(f"Manual metagraph refresh requested for netuid {netuid}")
+
+    # Check if sync is already in progress
+    with metagraph_cache_instance.lock:
+        if metagraph_cache_instance.sync_in_progress.get(str(netuid), False):
+            return {
+                "status": "already_updating",
+                "message": f"Metagraph sync already in progress for netuid {netuid}",
+            }
+
+    # Force sync
+    asyncio.create_task(
+        metagraph_cache_instance.get_metagraph_data_async(netuid, force=True)
+    )
+
+    return {
+        "status": "refresh_started",
+        "message": f"Manual metagraph refresh initiated for netuid {netuid}",
+    }
+
+
+@app.post("/refresh-all-metagraphs")
+async def force_refresh_all_metagraphs():
+    """Force a manual refresh of all active metagraphs"""
+    logger.info("Manual refresh requested for all metagraphs")
+
+    # Get active netuids
+    active_netuids = set()
+    with cache_lock:
+        for process in process_cache.get("data", []):
+            if process.get("state") == "online" and process.get("netuid"):
+                try:
+                    active_netuids.add(int(process.get("netuid")))
+                except (ValueError, TypeError):
+                    pass
+
+    if not active_netuids:
+        return {
+            "status": "no_active_netuids",
+            "message": "No active netuids found to refresh",
+        }
+
+    # Force sync all
+    tasks = []
+    for netuid in sorted(active_netuids):
+        task = metagraph_cache_instance.get_metagraph_data_async(netuid, force=True)
+        tasks.append(asyncio.create_task(task))
+
+    return {
+        "status": "refresh_started",
+        "message": f"Manual metagraph refresh initiated for {len(active_netuids)} netuids",
+        "netuids": sorted(list(active_netuids)),
+    }
+
+
 @app.get("/logs/{process_name}")
-async def get_process_logs(process_name: str, lines: int = 50, log_type: str = "both"):
+async def get_process_logs(
+    process_name: str,
+    lines: int = 50,
+    log_type: str = "both",
+    force_refresh: bool = False,
+):
     """Get logs for a specific process"""
     if lines > 500:
         lines = 500  # Cap maximum lines
@@ -716,6 +979,16 @@ async def get_process_logs(process_name: str, lines: int = 50, log_type: str = "
     response = {"process": process_name, "logs": {}}
 
     try:
+        # Clear cache if force_refresh
+        if force_refresh:
+            with log_cache_lock:
+                keys_to_remove = []
+                for key in log_cache:
+                    if key.startswith(f"{process_name}_"):
+                        keys_to_remove.append(key)
+                for key in keys_to_remove:
+                    del log_cache[key]
+
         if log_type in ["error", "both"]:
             # Override config for this specific request
             original_max_lines = config.MAX_LOG_LINES
@@ -741,6 +1014,212 @@ async def get_process_logs(process_name: str, lines: int = 50, log_type: str = "
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/system")
+async def get_system_metrics():
+    """Get system-wide metrics"""
+    try:
+        cpu_percent = psutil.cpu_percent(interval=1)
+        memory = psutil.virtual_memory()
+        disk = psutil.disk_usage("/")
+
+        # Get per-CPU usage
+        cpu_per_core = psutil.cpu_percent(interval=1, percpu=True)
+
+        # Get process count by state
+        process_states = {"online": 0, "stopped": 0, "errored": 0}
+        with cache_lock:
+            for process in process_cache.get("data", []):
+                state = process.get("state", "unknown")
+                if state in process_states:
+                    process_states[state] += 1
+
+        return {
+            "cpu": {
+                "total": cpu_percent,
+                "per_core": cpu_per_core,
+                "count": psutil.cpu_count(),
+                "count_logical": psutil.cpu_count(logical=True),
+            },
+            "memory": {
+                "total_gb": round(memory.total / (1024**3), 2),
+                "used_gb": round(memory.used / (1024**3), 2),
+                "available_gb": round(memory.available / (1024**3), 2),
+                "percent": memory.percent,
+            },
+            "disk": {
+                "total_gb": round(disk.total / (1024**3), 2),
+                "used_gb": round(disk.used / (1024**3), 2),
+                "free_gb": round(disk.free / (1024**3), 2),
+                "percent": disk.percent,
+            },
+            "processes": process_states,
+            "monitor_service": get_resource_usage(),
+        }
+    except Exception as e:
+        logger.error(f"Error getting system metrics: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/cache-status")
+async def get_cache_status():
+    """Get status of all caches"""
+    current_time = time.time()
+
+    # Log cache status
+    log_cache_status = {}
+    with log_cache_lock:
+        for key, value in log_cache.items():
+            age_seconds = current_time - value.get("timestamp", 0)
+            log_cache_status[key] = {
+                "age_seconds": round(age_seconds),
+                "age_minutes": round(age_seconds / 60, 1),
+                "stale": age_seconds > config.LOG_CACHE_TTL,
+                "size_bytes": len(value.get("logs", "")),
+            }
+
+    # Process cache status
+    with cache_lock:
+        process_cache_status = {
+            "last_updated": (
+                process_cache.get("last_updated").isoformat()
+                if process_cache.get("last_updated")
+                else None
+            ),
+            "is_updating": process_cache.get("is_updating", False),
+            "has_error": bool(process_cache.get("error")),
+            "process_count": len(process_cache.get("data", [])),
+        }
+
+    # Metagraph cache status
+    metagraph_cache_status = {}
+    with metagraph_cache_instance.lock:
+        metagraph_cache_status = {
+            "cached_netuids": len(metagraph_cache_instance.cache),
+            "syncs_in_progress": sum(
+                1 for v in metagraph_cache_instance.sync_in_progress.values() if v
+            ),
+            "total_hotkeys_cached": sum(
+                len(data.get("hotkeys", []))
+                for data in metagraph_cache_instance.cache.values()
+            ),
+        }
+
+    return {
+        "log_cache": {
+            "entries": len(log_cache_status),
+            "total_size_kb": round(
+                sum(v["size_bytes"] for v in log_cache_status.values()) / 1024, 2
+            ),
+            "stale_entries": sum(1 for v in log_cache_status.values() if v["stale"]),
+            "details": log_cache_status,
+        },
+        "process_cache": process_cache_status,
+        "metagraph_cache": metagraph_cache_status,
+        "cache_config": {
+            "log_cache_ttl": config.LOG_CACHE_TTL,
+            "metagraph_cache_ttl": config.METAGRAPH_CACHE_TTL,
+            "incremental_updates": config.ENABLE_INCREMENTAL_UPDATES,
+        },
+    }
+
+
+@app.delete("/clear-caches")
+async def clear_caches():
+    """Clear all caches (useful for debugging)"""
+    logger.warning("Clearing all caches")
+
+    # Clear log cache
+    with log_cache_lock:
+        log_cache_size = len(log_cache)
+        log_cache.clear()
+
+    # Clear metagraph cache
+    with metagraph_cache_instance.lock:
+        metagraph_cache_size = len(metagraph_cache_instance.cache)
+        metagraph_cache_instance.cache.clear()
+        metagraph_cache_instance.last_sync.clear()
+
+    # Don't clear process cache but mark it for refresh
+    asyncio.create_task(sync_processes_async())
+
+    return {
+        "status": "caches_cleared",
+        "cleared": {
+            "log_cache_entries": log_cache_size,
+            "metagraph_cache_entries": metagraph_cache_size,
+        },
+        "message": "All caches cleared. Process sync triggered.",
+    }
+
+
+@app.get("/debug")
+async def debug_info():
+    """Get debug information about the service"""
+    import platform
+
+    # Get thread info
+    thread_info = []
+    for thread in threading.enumerate():
+        thread_info.append(
+            {
+                "name": thread.name,
+                "alive": thread.is_alive(),
+                "daemon": thread.daemon,
+            }
+        )
+
+    # Get asyncio task info
+    tasks = asyncio.all_tasks()
+    task_info = []
+    for task in tasks:
+        task_info.append(
+            {
+                "name": task.get_name() if hasattr(task, "get_name") else str(task),
+                "done": task.done(),
+            }
+        )
+
+    return {
+        "service": {
+            "version": "2.0",
+            "python_version": platform.python_version(),
+            "platform": platform.platform(),
+            "uptime_seconds": (
+                time.time() - app.state.start_time
+                if hasattr(app.state, "start_time")
+                else None
+            ),
+        },
+        "config": {
+            "process_sync_interval": config.PROCESS_SYNC_INTERVAL,
+            "metagraph_sync_interval": config.METAGRAPH_SYNC_INTERVAL,
+            "adaptive_sync_enabled": config.ADAPTIVE_SYNC,
+            "current_sync_interval": sync_scheduler.current_interval,
+        },
+        "threads": {
+            "count": threading.active_count(),
+            "list": thread_info,
+        },
+        "async_tasks": {
+            "count": len(task_info),
+            "list": task_info,
+        },
+        "resource_usage": get_resource_usage(),
+    }
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Additional startup tasks"""
+    app.state.start_time = time.time()
+    logger.info(f"PM2 Process Monitor v2.0 started at {datetime.now().isoformat()}")
+    logger.info(f"Configuration: {config}")
+
+
 if __name__ == "__main__":
-    logger.info("Server starting on http://127.0.0.1:8080/")
+    logger.info("PM2 Process Monitor starting on http://127.0.0.1:8080/")
+    logger.info(f"Process sync interval: {config.PROCESS_SYNC_INTERVAL}s")
+    logger.info(f"Metagraph sync interval: {config.METAGRAPH_SYNC_INTERVAL}s (strict)")
+    logger.info(f"Adaptive sync: {'enabled' if config.ADAPTIVE_SYNC else 'disabled'}")
+
     uvicorn.run("main:app", host="127.0.0.1", port=8080, reload=True)
