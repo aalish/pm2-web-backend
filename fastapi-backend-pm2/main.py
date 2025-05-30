@@ -444,8 +444,8 @@ async def sync_processes_async():
                 if netuid and wallet_name and hotkey:
                     try:
                         wallet = bt.wallet(name=wallet_name, hotkey=hotkey)
-                        # hotkey_ss58 = wallet.hotkey.ss58_address
-                        hotkey_ss58 = "5FnuQif2GSDtuRU28MgZSCsi53oqKqDpq1Bko4TiK6GTwT76"
+                        hotkey_ss58 = wallet.hotkey.ss58_address
+                        # hotkey_ss58 = "5FnuQif2GSDtuRU28MgZSCsi53oqKqDpq1Bko4TiK6GTwT76"
 
                         # Get metagraph data
                         metagraph_data = metagraph_results.get(netuid)
